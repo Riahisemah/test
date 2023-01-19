@@ -1,0 +1,8 @@
+node_modules
+.npm-debug.log
+tags
+.nyc_output
+coverage
+.idea
+testProjects/**/node_modules
+testProjects/**/package-lock.json

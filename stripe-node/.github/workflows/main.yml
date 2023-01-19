@@ -1,0 +1,139 @@
+name: CI
+
+on:
+  workflow_dispatch: {}
+  push:
+    branches:
+      - master
+      - beta
+      - sdk-release/**
+      - feature/**
+    tags:
+      - v[0-9]+.[0-9]+.[0-9]+*
+  pull_request:
+    branches:
+      - master
+      - beta
+      - sdk-release/**
+      - feature/**
+
+
+jobs:
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v2
+
+      - name: Setup node
+        uses: actions/setup-node@v2
+
+      - name: Get yarn cache directory path
+        id: yarn-cache-dir-path
+        run: echo "::set-output name=dir::$(yarn cache dir)"
+
+      - uses: actions/cache@v2
+        id: yarn-cache
+        with:
+          path: ${{ steps.yarn-cache-dir-path.outputs.dir }}
+          key: ${{ runner.os }}-yarn-${{ hashFiles('**/yarn.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-yarn-
+
+      - name: Build Typescript
+        run: yarn && yarn build
+
+      - name: Check for changes
+        run: |
+          if [[ `git status --porcelain` ]]; then
+            git diff
+            >&2 echo "Changes detected after compiling TypeScript. Please run yarn build and check in all compiled files in lib/."
+            exit 1
+          else
+            exit 0
+          fi
+
+      - name: Lint
+        run: yarn lint
+
+  test:
+    name: Test (${{ matrix.node }})
+    needs: [build]
+    strategy:
+      matrix:
+        os:
+          - "ubuntu-latest"
+        node:
+          - "19"
+          - "18"
+          - "16"
+          - "14"
+          - "12"
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v2
+
+      - name: Setup node
+        uses: actions/setup-node@v2
+        with:
+          node-version: ${{ matrix.node }}
+
+      - name: Print Node.js version
+        run: node -v
+
+      - name: Get yarn cache directory path
+        id: yarn-cache-dir-path
+        run: echo "::set-output name=dir::$(yarn cache dir)"
+
+      - uses: actions/cache@v2
+        id: yarn-cache
+        with:
+          path: ${{ steps.yarn-cache-dir-path.outputs.dir }}
+          key: ${{ runner.os }}-yarn-${{ hashFiles('**/yarn.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-yarn-
+
+      - name: Start stripe-mock
+        run: docker run -d -p 12111-12112:12111-12112 stripe/stripe-mock && sleep 5
+
+      - name: Test
+        run: yarn && yarn test
+
+      - name: Coveralls
+        run: yarn report && yarn coveralls
+        if: env.COVERALLS_REPO_TOKEN && matrix.node == '18'
+        env:
+          GITHUB_TOKEN: ${{ secrets.github_token }}
+          COVERALLS_REPO_TOKEN: ${{ secrets.COVERALLS_REPO_TOKEN }}
+          COVERALLS_FLAG_NAME: node-${{ matrix.node }}
+
+  publish:
+    name: Publish
+    if: >-
+      (github.event_name == 'workflow_dispatch' || github.event_name == 'push') &&
+      startsWith(github.ref, 'refs/tags/v') &&
+      endsWith(github.actor, '-stripe')
+    needs: [build, test]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+      - run: sudo apt-get install -y oathtool
+      - name: Publish to NPM
+        run: |
+          set +ex
+          npm config set //registry.npmjs.org/:_authToken $NPM_AUTH_TOKEN
+          # print the NPM user name for validation
+          npm whoami
+          VERSION=$(node -p "require('./package.json').version" )
+          # Only publish stable versions to the latest tag
+          if [[ "$VERSION" =~ ^[^-]+$ ]]; then
+            NPM_TAG="latest"
+          else
+            NPM_TAG="beta"
+          fi
+          echo "Publishing $VERSION with $NPM_TAG tag."
+          npm publish --otp="$(oathtool -b --totp $NPM_OTP)" --tag $NPM_TAG
+        env:
+          NPM_AUTH_TOKEN: ${{ secrets.NPM_AUTH_TOKEN }}
+          NPM_OTP: ${{ secrets.NPM_OTP }}
